@@ -147,3 +147,36 @@ public struct RecentlyViewedChatItem: Identifiable, Codable, Hashable, Sendable 
         self.viewedAt = viewedAt
     }
 }
+
+/// Shared media section tabs in Chat Info, matching Materialgram's `Storage::SharedMediaType`
+/// (`info_media_buttons.cpp` / `storage_shared_media.h`: `Photo`, `Video`, `File`, `VoiceFile`, `GIF`)
+/// and iMe's `SharedMediaLayout` separate Photo and Video tabs.
+public enum SharedMediaTab: String, CaseIterable, Identifiable, Sendable {
+    case photos = "Photos"
+    case videos = "Videos"
+    case files = "Files"
+    case voice = "Voice"
+    case gifs = "GIFs"
+
+    public var id: String { rawValue }
+
+    public var iconName: String {
+        switch self {
+        case .photos: return "photo.on.rectangle"
+        case .videos: return "video.fill"
+        case .files: return "doc.fill"
+        case .voice: return "waveform"
+        case .gifs: return "sparkles.tv"
+        }
+    }
+
+    public var tdlibFilterType: String {
+        switch self {
+        case .photos: return "searchMessagesFilterPhoto"
+        case .videos: return "searchMessagesFilterVideo"
+        case .files: return "searchMessagesFilterDocument"
+        case .voice: return "searchMessagesFilterVoiceNote"
+        case .gifs: return "searchMessagesFilterAnimation"
+        }
+    }
+}

@@ -101,6 +101,9 @@ public final class ChatStore: ObservableObject {
     @Published public var activeChatPinnedMessage: Message? = nil
     @Published public var serverSearchedMessages: [Message] = []
     @Published public var isSearchingInChatMessages: Bool = false
+    @Published public var selectedSharedMediaTab: SharedMediaTab = .photos
+    @Published public var sharedMediaByTab: [SharedMediaTab: [Message]] = [:]
+    @Published public var isLoadingSharedMedia: Bool = false
     @Published public var inputText: String = ""
     @Published public var replyingToMessage: Message? = nil
 
@@ -1085,6 +1088,7 @@ public final class ChatStore: ObservableObject {
         activeChatTopics = []
         activeChatPinnedMessage = nil
         serverSearchedMessages = []
+        sharedMediaByTab = [:]
         if let selected = chats.first(where: { $0.id == id }) {
             recordRecentlyViewedChat(selected)
         }
@@ -1244,6 +1248,11 @@ public final class ChatStore: ObservableObject {
     public func updateMessageMediaLocalPath(messageId: String, path: String) {
         if let idx = messages.firstIndex(where: { $0.id == messageId }) {
             messages[idx].media?.localPath = path
+        }
+        for tab in SharedMediaTab.allCases {
+            if let sIdx = sharedMediaByTab[tab]?.firstIndex(where: { $0.id == messageId }) {
+                sharedMediaByTab[tab]?[sIdx].media?.localPath = path
+            }
         }
         if let bIdx = bookmarks.firstIndex(where: { $0.messageId == messageId }) {
             bookmarks[bIdx].mediaLocalPath = path
@@ -1738,6 +1747,64 @@ public final class ChatStore: ObservableObject {
             guard !Task.isCancelled, self.selectedChatId == chatId else { return }
             self.serverSearchedMessages = found
             self.isSearchingInChatMessages = false
+        }
+    }
+
+    // MARK: - Chat Info Shared Media (Separated Photos, Videos, Files, Voice, GIFs — Materialgram & iMe Parity)
+
+    public func sharedMediaMessages(for tab: SharedMediaTab) -> [Message] {
+        let localMatches = messages.filter { msg in
+            guard let kind = msg.media?.kind else { return false }
+            switch tab {
+            case .photos: return kind == .photo
+            case .videos: return kind == .video || kind == .videoNote
+            case .files: return kind == .document
+            case .voice: return kind == .voiceNote
+            case .gifs: return kind == .animation
+            }
+        }
+        let serverMatches = sharedMediaByTab[tab] ?? []
+        if serverMatches.isEmpty {
+            return localMatches.reversed()
+        }
+        var seen = Set<String>()
+        var combined: [Message] = []
+        for msg in (serverMatches + localMatches.reversed()) {
+            if seen.insert(msg.id).inserted {
+                combined.append(msg)
+            }
+        }
+        return combined
+    }
+
+    public func loadSharedMediaForActiveChat() async {
+        guard let chatId = selectedChatId, let tdlibProvider, tdlibAuthState == .ready else { return }
+        isLoadingSharedMedia = true
+        defer { isLoadingSharedMedia = false }
+
+        for tab in SharedMediaTab.allCases {
+            guard selectedChatId == chatId else { return }
+            let fetched = (try? await tdlibProvider.fetchSharedMedia(for: chatId, tab: tab, limit: 36)) ?? []
+            guard selectedChatId == chatId else { return }
+            sharedMediaByTab[tab] = fetched
+
+            // Hydrate thumbnails and photo files for the top 15 items per tab
+            for msg in fetched.prefix(15) {
+                guard selectedChatId == chatId, let media = msg.media else { continue }
+                if media.kind == .photo, media.localPath == nil, let fid = media.fileId {
+                    if let path = try? await tdlibProvider.downloadMediaFile(fileId: fid, priority: 20, synchronous: true),
+                       selectedChatId == chatId,
+                       let idx = sharedMediaByTab[tab]?.firstIndex(where: { $0.id == msg.id }) {
+                        sharedMediaByTab[tab]?[idx].media?.localPath = path
+                    }
+                } else if media.thumbnailLocalPath == nil, let tid = media.thumbnailFileId {
+                    if let path = try? await tdlibProvider.downloadMediaFile(fileId: tid, priority: 18, synchronous: true),
+                       selectedChatId == chatId,
+                       let idx = sharedMediaByTab[tab]?.firstIndex(where: { $0.id == msg.id }) {
+                        sharedMediaByTab[tab]?[idx].media?.thumbnailLocalPath = path
+                    }
+                }
+            }
         }
     }
 }

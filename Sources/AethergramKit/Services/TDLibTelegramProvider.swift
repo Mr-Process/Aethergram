@@ -1849,6 +1849,26 @@ public actor TDLibTelegramProvider: TelegramServiceProtocol {
         return rawMsgs.reversed().map { parseMessage($0, chatId: chatId) }
     }
 
+    /// Queries shared media messages in a chat by separated category (`Photos`, `Videos`, `Files`, `Voice`, `GIFs`)
+    /// via TDLib `searchChatMessages` with `filter: ["@type": tab.tdlibFilterType]`, matching Materialgram's
+    /// `Storage::SharedMediaType` (`Photo`, `Video`, `File`, `VoiceFile`, `GIF`).
+    public func fetchSharedMedia(for chatId: String, tab: SharedMediaTab, limit: Int = 36) async throws -> [Message] {
+        guard authState == .ready, let numericChatId = Int64(chatId) else { return [] }
+        guard let res = try? request([
+            "@type": "searchChatMessages",
+            "chat_id": numericChatId,
+            "query": "",
+            "from_message_id": 0,
+            "offset": 0,
+            "limit": limit,
+            "filter": ["@type": tab.tdlibFilterType]
+        ], maxIterations: 14, stepTimeout: 0.15),
+              let rawMsgs = res["messages"] as? [[String: Any]] else {
+            return []
+        }
+        return rawMsgs.map { parseMessage($0, chatId: chatId) }
+    }
+
     // MARK: - Media & Formatting Helpers
     private static func extractFileInfo(_ fileObj: [String: Any]?) -> (Int32?, String?) {
         guard let fileObj else { return (nil, nil) }

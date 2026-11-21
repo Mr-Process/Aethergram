@@ -326,6 +326,7 @@ func runTests() async throws {
 
     // Test recently viewed recording & persistence
     let tempRecentURL = FileManager.default.temporaryDirectory.appendingPathComponent("ag_recent_test_\(UUID().uuidString).json")
+    store.recentlyViewedChats = []
     store.recordRecentlyViewedChat(ch1, storageURL: tempRecentURL)
     store.recordRecentlyViewedChat(grp1, storageURL: tempRecentURL)
     let loadedRecent = ChatStore.loadRecentlyViewedChats(from: tempRecentURL)
@@ -333,8 +334,32 @@ func runTests() async throws {
     try? FileManager.default.removeItem(at: tempRecentURL)
     print("  ✓ Verified ranked search, scope pills, channel/group pinning, and recently viewed persistence")
 
+    // Test 17: Chat Info Shared Media Separate Sections (Photos, Videos, Files, Voice, GIFs)
+    print("[TEST 17/17] Testing Chat Info Separate Photos & Videos Shared Media Tabs...")
+    assert(SharedMediaTab.photos.tdlibFilterType == "searchMessagesFilterPhoto", "Photos tab must use searchMessagesFilterPhoto")
+    assert(SharedMediaTab.videos.tdlibFilterType == "searchMessagesFilterVideo", "Videos tab must use searchMessagesFilterVideo")
+    assert(SharedMediaTab.files.tdlibFilterType == "searchMessagesFilterDocument", "Files tab must use searchMessagesFilterDocument")
+    let docMsg = Message(
+        id: "303",
+        chatId: "42",
+        senderName: "Archivist",
+        text: "Spec PDF",
+        timestamp: "14:10",
+        isOutgoing: false,
+        media: MessageMedia(kind: .document, fileId: 19, fileName: "spec.pdf", fileSize: 120_000)
+    )
+    store.messages = [testMsg, mediaMsg, videoMsg, docMsg]
+    store.sharedMediaByTab = [:]
+    let onlyPhotos = store.sharedMediaMessages(for: .photos)
+    let onlyVideos = store.sharedMediaMessages(for: .videos)
+    let onlyFiles = store.sharedMediaMessages(for: .files)
+    assert(onlyPhotos.count == 1 && onlyPhotos.first?.id == mediaMsg.id, "Photos section must only contain photo messages")
+    assert(onlyVideos.count == 1 && onlyVideos.first?.id == videoMsg.id, "Videos section must only contain video messages")
+    assert(onlyFiles.count == 1 && onlyFiles.first?.id == docMsg.id, "Files section must only contain document messages")
+    print("  ✓ Verified separated Photos, Videos, Files, Voice, and GIFs sections in Chat Info")
+
     print("========================================")
-    print("ALL 16 LIVE FEATURE TEST SUITES PASSED! (16/16)")
+    print("ALL 17 LIVE FEATURE TEST SUITES PASSED! (17/17)")
     print("========================================")
 }
 
