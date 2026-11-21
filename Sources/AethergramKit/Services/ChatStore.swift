@@ -89,7 +89,18 @@ public final class ChatStore: ObservableObject {
     @Published public var chats: [Chat] = []
     @Published public var selectedChatId: String? = nil
     @Published public var messages: [Message] = []
-    @Published public var searchText: String = ""
+    @Published public var searchText: String = "" {
+        didSet {
+            triggerGlobalSearchIfNeeded()
+        }
+    }
+    @Published public var searchScope: ChatSearchScope = .all
+    @Published public var globalSearchResults: [Chat] = []
+    @Published public var isSearchingGlobalChats: Bool = false
+    @Published public var recentlyViewedChats: [RecentlyViewedChatItem] = []
+    @Published public var activeChatPinnedMessage: Message? = nil
+    @Published public var serverSearchedMessages: [Message] = []
+    @Published public var isSearchingInChatMessages: Bool = false
     @Published public var inputText: String = ""
     @Published public var replyingToMessage: Message? = nil
 
@@ -174,7 +185,11 @@ public final class ChatStore: ObservableObject {
     // Inspector Panel & In-Chat Search / Export State
     @Published public var showInspector: Bool = false
     @Published public var showInChatSearch: Bool = false
-    @Published public var inChatSearchQuery: String = ""
+    @Published public var inChatSearchQuery: String = "" {
+        didSet {
+            triggerInChatServerSearchIfNeeded()
+        }
+    }
     @Published public var lastExportStatus: String? = nil
 
     // Phase 1-5 Parity Controllers & Sheet State
@@ -238,6 +253,8 @@ public final class ChatStore: ObservableObject {
 
     private var voiceAudioPlayer: AVAudioPlayer?
     private var voiceAudioDelegate: VoiceAudioDelegate?
+    private var globalSearchTask: Task<Void, Never>?
+    private var inChatSearchTask: Task<Void, Never>?
 
     public var selectedTopic: ForumTopic? {
         guard let tid = selectedTopicId else { return nil }
@@ -323,6 +340,7 @@ public final class ChatStore: ObservableObject {
             self.showWallpaperPattern = UserDefaults.standard.bool(forKey: "mg_wallpaper_pattern")
         }
         self.bookmarks = BookmarkService.loadBookmarks()
+        self.recentlyViewedChats = Self.loadRecentlyViewedChats()
     }
 
     /// Copies a user-selected image file into Application Support/Materialgram/wallpapers
@@ -756,22 +774,123 @@ public final class ChatStore: ObservableObject {
     }
 
     public var filteredChats: [Chat] {
-        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return chats
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var base: [Chat]
+        if query.isEmpty {
+            base = chats
+        } else {
+            let localIds = Set(chats.map(\.id))
+            let remoteExtras = globalSearchResults.filter { !localIds.contains($0.id) }
+            let combined = chats + remoteExtras
+            let scored: [(Chat, Int)] = combined.compactMap { chat in
+                let s = Self.searchScore(for: chat, query: query)
+                return s > 0 ? (chat, s) : nil
+            }
+            base = scored.sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                if lhs.0.isPinned != rhs.0.isPinned { return lhs.0.isPinned && !rhs.0.isPinned }
+                return lhs.0.unreadCount > rhs.0.unreadCount
+            }.map(\.0)
         }
-        return chats.filter {
-            $0.title.localizedCaseInsensitiveContains(searchText) ||
-            $0.lastMessagePreview.localizedCaseInsensitiveContains(searchText)
+
+        // Apply active scope filter
+        let scoped = base.filter { chat in
+            switch searchScope {
+            case .all: return true
+            case .channels: return chat.type == .channel
+            case .groups: return chat.type == .group
+            case .direct: return chat.type == .direct || chat.type == .bot
+            case .unread: return chat.unreadCount > 0
+            case .pinned: return chat.isPinned
+            }
         }
+
+        // Always keep pinned chats at the top when no query is active
+        if query.isEmpty {
+            let pinned = scoped.filter(\.isPinned)
+            let unpinned = scoped.filter { !$0.isPinned }
+            return pinned + unpinned
+        }
+        return scoped
+    }
+
+    public static func searchScore(for chat: Chat, query: String) -> Int {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return 1 }
+
+        let tokens = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        let titleLower = chat.title.lowercased()
+        let usernameLower = (chat.username ?? "").lowercased()
+        let subtitleLower = (chat.subtitle ?? "").lowercased()
+        let previewLower = chat.lastMessagePreview.lowercased()
+        let idLower = chat.id.lowercased()
+        let fullCorpus = "\(titleLower) \(usernameLower) \(subtitleLower) \(previewLower) \(idLower)"
+
+        // All tokens must match somewhere in the chat metadata or subsequence of title
+        for tok in tokens {
+            let cleanTok = tok.hasPrefix("@") ? String(tok.dropFirst()) : tok
+            if !fullCorpus.contains(tok) && !fullCorpus.contains(cleanTok) && !isSubsequence(cleanTok, of: titleLower) {
+                return 0
+            }
+        }
+
+        var score = 10
+        if titleLower == trimmed {
+            score += 200
+        } else if titleLower.hasPrefix(trimmed) {
+            score += 120
+        } else if titleLower.contains(trimmed) {
+            score += 80
+        }
+        if !usernameLower.isEmpty {
+            let cleanQ = trimmed.hasPrefix("@") ? trimmed : "@\(trimmed)"
+            if usernameLower == cleanQ {
+                score += 180
+            } else if usernameLower.contains(trimmed.replacingOccurrences(of: "@", with: "")) {
+                score += 95
+            }
+        }
+        if subtitleLower.contains(trimmed) {
+            score += 35
+        }
+        if previewLower.contains(trimmed) {
+            score += 25
+        }
+        if chat.isPinned {
+            score += 15
+        }
+        return score
+    }
+
+    private static func isSubsequence(_ needle: String, of haystack: String) -> Bool {
+        guard needle.count >= 2 else { return false }
+        var idx = haystack.startIndex
+        for ch in needle {
+            guard let found = haystack[idx...].firstIndex(of: ch) else {
+                return false
+            }
+            idx = haystack.index(after: found)
+        }
+        return true
     }
 
     public var filteredMessages: [Message] {
         let q = inChatSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard showInChatSearch, !q.isEmpty else { return messages }
-        return messages.filter {
+        let localMatches = messages.filter {
             $0.text.localizedCaseInsensitiveContains(q) ||
-            $0.senderName.localizedCaseInsensitiveContains(q)
+            $0.senderName.localizedCaseInsensitiveContains(q) ||
+            ($0.media?.fileName ?? "").localizedCaseInsensitiveContains(q)
         }
+        if serverSearchedMessages.isEmpty {
+            return localMatches
+        }
+        var seen = Set(localMatches.map(\.id))
+        var merged = localMatches
+        for msg in serverSearchedMessages where seen.insert(msg.id).inserted {
+            merged.append(msg)
+        }
+        return merged
     }
 
     public func exportSelectedChat() {
@@ -955,9 +1074,20 @@ public final class ChatStore: ObservableObject {
     }
 
     public func selectChat(id: String) async {
+        // Ensure a global-search chat is inserted into `chats` if not already in the active folder list
+        if !chats.contains(where: { $0.id == id }),
+           let globalMatch = globalSearchResults.first(where: { $0.id == id }) {
+            chats.insert(globalMatch, at: 0)
+        }
+
         selectedChatId = id
         selectedTopicId = nil
         activeChatTopics = []
+        activeChatPinnedMessage = nil
+        serverSearchedMessages = []
+        if let selected = chats.first(where: { $0.id == id }) {
+            recordRecentlyViewedChat(selected)
+        }
         guard let telegramService else { return }
         isLoadingMessages = true
         defer { isLoadingMessages = false }
@@ -971,6 +1101,15 @@ public final class ChatStore: ObservableObject {
                 activeChatTopics = loadedTopics
             }
             isLoadingTopics = false
+        }
+
+        if let tdlibProvider {
+            Task {
+                if let pinned = try? await tdlibProvider.fetchPinnedMessage(for: id),
+                   self.selectedChatId == id {
+                    self.activeChatPinnedMessage = pinned
+                }
+            }
         }
 
         do {
@@ -1463,6 +1602,142 @@ public final class ChatStore: ObservableObject {
             #endif
         } catch {
             updateErrorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Pinning (Channels, Groups, Direct Chats & Messages)
+
+    /// Toggles pin status for a channel, group, or direct chat in the current folder/list and syncs via TDLib `toggleChatIsPinned`.
+    public func toggleChatPin(_ chat: Chat) async {
+        let newPinned = !chat.isPinned
+        if let idx = chats.firstIndex(where: { $0.id == chat.id }) {
+            chats[idx].isPinned = newPinned
+        }
+        if let rIdx = recentlyViewedChats.firstIndex(where: { $0.chatId == chat.id }) {
+            let updatedChat = chats.first(where: { $0.id == chat.id }) ?? chat
+            recentlyViewedChats[rIdx] = RecentlyViewedChatItem(chat: updatedChat, viewedAt: recentlyViewedChats[rIdx].viewedAt)
+            Self.saveRecentlyViewedChats(recentlyViewedChats)
+        }
+        if let tdlibProvider, tdlibAuthState == .ready {
+            try? await tdlibProvider.toggleChatIsPinned(chatId: chat.id, inFolderId: selectedFolderId, isPinned: newPinned)
+        }
+    }
+
+    /// Pins a message inside the active channel or group and syncs via TDLib `pinChatMessage`.
+    public func pinMessageInActiveChat(_ message: Message, disableNotification: Bool = false) async {
+        guard let chatId = selectedChatId else { return }
+        activeChatPinnedMessage = message
+        if let idx = chats.firstIndex(where: { $0.id == chatId }) {
+            chats[idx].pinnedMessageId = message.id
+        }
+        if let tdlibProvider, tdlibAuthState == .ready {
+            try? await tdlibProvider.pinChatMessage(chatId: chatId, messageId: message.id, disableNotification: disableNotification)
+        }
+    }
+
+    /// Unpins the active pinned message inside the current channel or group and syncs via TDLib `unpinChatMessage`.
+    public func unpinMessageInActiveChat() async {
+        guard let chatId = selectedChatId, let pinned = activeChatPinnedMessage else { return }
+        let msgId = pinned.id
+        activeChatPinnedMessage = nil
+        if let idx = chats.firstIndex(where: { $0.id == chatId }) {
+            chats[idx].pinnedMessageId = nil
+        }
+        if let tdlibProvider, tdlibAuthState == .ready {
+            try? await tdlibProvider.unpinChatMessage(chatId: chatId, messageId: msgId)
+        }
+    }
+
+    /// Scrolls the active conversation to the pinned message.
+    public func jumpToPinnedMessage() {
+        guard let pinned = activeChatPinnedMessage else { return }
+        if !messages.contains(where: { $0.id == pinned.id }) {
+            messages.insert(pinned, at: 0)
+        }
+        scrollToMessageIdRequest = pinned.id
+    }
+
+    // MARK: - Recently Viewed Channels, Groups & Chats
+
+    public static func defaultRecentlyViewedURL() -> URL {
+        TDLibConfiguration.defaultSupportDirectory()
+            .appendingPathComponent("recently_viewed_chats.json")
+    }
+
+    public static func loadRecentlyViewedChats(from url: URL = defaultRecentlyViewedURL()) -> [RecentlyViewedChatItem] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([RecentlyViewedChatItem].self, from: data)) ?? []
+    }
+
+    public static func saveRecentlyViewedChats(_ items: [RecentlyViewedChatItem], to url: URL = defaultRecentlyViewedURL()) {
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(items) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    public func recordRecentlyViewedChat(_ chat: Chat, storageURL: URL = defaultRecentlyViewedURL()) {
+        recentlyViewedChats.removeAll { $0.chatId == chat.id }
+        recentlyViewedChats.insert(RecentlyViewedChatItem(chat: chat), at: 0)
+        if recentlyViewedChats.count > 12 {
+            recentlyViewedChats = Array(recentlyViewedChats.prefix(12))
+        }
+        Self.saveRecentlyViewedChats(recentlyViewedChats, to: storageURL)
+    }
+
+    public func removeRecentlyViewedChat(chatId: String, storageURL: URL = defaultRecentlyViewedURL()) {
+        recentlyViewedChats.removeAll { $0.chatId == chatId }
+        Self.saveRecentlyViewedChats(recentlyViewedChats, to: storageURL)
+    }
+
+    public func clearRecentlyViewedChats(storageURL: URL = defaultRecentlyViewedURL()) {
+        recentlyViewedChats.removeAll()
+        Self.saveRecentlyViewedChats([], to: storageURL)
+    }
+
+    // MARK: - Global & In-Chat Server Search
+
+    private func triggerGlobalSearchIfNeeded() {
+        globalSearchTask?.cancel()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2, let tdlibProvider, tdlibAuthState == .ready else {
+            globalSearchResults = []
+            isSearchingGlobalChats = false
+            return
+        }
+        isSearchingGlobalChats = true
+        globalSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let found = (try? await tdlibProvider.searchGlobalChats(query: query, limit: 20)) ?? []
+            guard !Task.isCancelled else { return }
+            self.globalSearchResults = found
+            self.isSearchingGlobalChats = false
+        }
+    }
+
+    private func triggerInChatServerSearchIfNeeded() {
+        inChatSearchTask?.cancel()
+        let query = inChatSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard showInChatSearch, query.count >= 2, let chatId = selectedChatId, let tdlibProvider, tdlibAuthState == .ready else {
+            serverSearchedMessages = []
+            isSearchingInChatMessages = false
+            return
+        }
+        isSearchingInChatMessages = true
+        inChatSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let found = (try? await tdlibProvider.searchMessagesInChat(chatId: chatId, query: query, limit: 40)) ?? []
+            guard !Task.isCancelled, self.selectedChatId == chatId else { return }
+            self.serverSearchedMessages = found
+            self.isSearchingInChatMessages = false
         }
     }
 }

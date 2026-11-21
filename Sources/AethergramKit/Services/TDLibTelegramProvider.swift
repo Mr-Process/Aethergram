@@ -820,6 +820,7 @@ public actor TDLibTelegramProvider: TelegramServiceProtocol {
             var isForum = (cObj["view_as_topics"] as? Bool) ?? false
             var isDirectMessagesGroup = false
             var memberCount: Int? = nil
+            var username: String? = nil
 
             if (typeObj?["@type"] as? String) == "chatTypeSupergroup",
                let sgId = (typeObj?["supergroup_id"] as? NSNumber)?.int64Value,
@@ -828,6 +829,47 @@ public actor TDLibTelegramProvider: TelegramServiceProtocol {
                 if sgObj["is_forum"] as? Bool == true { isForum = true }
                 if sgObj["is_direct_messages_group"] as? Bool == true { isDirectMessagesGroup = true }
                 if let mc = sgObj["member_count"] as? Int, mc > 0 { memberCount = mc }
+                if let unameObj = sgObj["usernames"] as? [String: Any],
+                   let active = (unameObj["active_usernames"] as? [String])?.first,
+                   !active.isEmpty {
+                    username = "@\(active)"
+                } else if let legacyUname = sgObj["username"] as? String, !legacyUname.isEmpty {
+                    username = "@\(legacyUname)"
+                }
+            } else if (typeObj?["@type"] as? String) == "chatTypePrivate",
+                      let uid = (typeObj?["user_id"] as? NSNumber)?.int64Value,
+                      let uObj = try? request(["@type": "getUser", "user_id": uid], maxIterations: 6, stepTimeout: 0.08),
+                      (uObj["@type"] as? String) == "user" {
+                if let unameObj = uObj["usernames"] as? [String: Any],
+                   let active = (unameObj["active_usernames"] as? [String])?.first,
+                   !active.isEmpty {
+                    username = "@\(active)"
+                } else if let legacyUname = uObj["username"] as? String, !legacyUname.isEmpty {
+                    username = "@\(legacyUname)"
+                }
+            }
+
+            var isPinned = false
+            if let positions = cObj["positions"] as? [[String: Any]] {
+                for pos in positions {
+                    if let listObj = pos["list"] as? [String: Any] {
+                        let listType = listObj["@type"] as? String
+                        let desiredType = chatList["@type"] as? String
+                        if listType == desiredType {
+                            if listType == "chatListFolder" {
+                                let posFolder = listObj["chat_folder_id"] as? Int
+                                let desiredFolder = chatList["chat_folder_id"] as? Int
+                                if posFolder == desiredFolder {
+                                    isPinned = (pos["is_pinned"] as? Bool) ?? false
+                                    break
+                                }
+                            } else {
+                                isPinned = (pos["is_pinned"] as? Bool) ?? false
+                                break
+                            }
+                        }
+                    }
+                }
             }
 
             let subtitle: String
@@ -864,13 +906,14 @@ public actor TDLibTelegramProvider: TelegramServiceProtocol {
                 lastMessagePreview: preview,
                 lastMessageTime: timestamp,
                 unreadCount: unread,
-                isPinned: false,
+                isPinned: isPinned,
                 isMuted: isMuted,
                 isOnline: false,
                 type: chatType,
                 isForum: isForum,
                 isDirectMessagesGroup: isDirectMessagesGroup,
-                memberCount: memberCount
+                memberCount: memberCount,
+                username: username
             ))
         }
         return chats
@@ -1634,6 +1677,176 @@ public actor TDLibTelegramProvider: TelegramServiceProtocol {
             "message_ids": ids,
             "force_read": true
         ], maxIterations: 6, stepTimeout: 0.1)
+    }
+
+    // MARK: - Pinning & Global Search (Channels, Groups, Direct Chats & Messages)
+
+    /// Pins or unpins a channel, group, or direct chat in the specified folder/main chat list via TDLib `toggleChatIsPinned`.
+    public func toggleChatIsPinned(chatId: String, inFolderId folderId: String, isPinned: Bool) async throws {
+        guard authState == .ready, let numericId = Int64(chatId) else { return }
+        let chatList: [String: Any]
+        if let filterId = Int(folderId) {
+            if isModernTDLib {
+                chatList = ["@type": "chatListFolder", "chat_folder_id": filterId]
+            } else {
+                chatList = ["@type": "chatListFilter", "chat_filter_id": filterId]
+            }
+        } else {
+            chatList = ["@type": "chatListMain"]
+        }
+        _ = try request([
+            "@type": "toggleChatIsPinned",
+            "chat_list": chatList,
+            "chat_id": numericId,
+            "is_pinned": isPinned
+        ], maxIterations: 12, stepTimeout: 0.15)
+    }
+
+    /// Pins a message inside a channel, group, or direct chat via TDLib `pinChatMessage`.
+    public func pinChatMessage(chatId: String, messageId: String, disableNotification: Bool = false) async throws {
+        guard authState == .ready,
+              let numericChatId = Int64(chatId),
+              let numericMsgId = Int64(messageId) else { return }
+        _ = try request([
+            "@type": "pinChatMessage",
+            "chat_id": numericChatId,
+            "message_id": numericMsgId,
+            "disable_notification": disableNotification,
+            "only_for_self": false
+        ], maxIterations: 12, stepTimeout: 0.15)
+    }
+
+    /// Unpins a message inside a channel, group, or direct chat via TDLib `unpinChatMessage`.
+    public func unpinChatMessage(chatId: String, messageId: String) async throws {
+        guard authState == .ready,
+              let numericChatId = Int64(chatId),
+              let numericMsgId = Int64(messageId) else { return }
+        _ = try request([
+            "@type": "unpinChatMessage",
+            "chat_id": numericChatId,
+            "message_id": numericMsgId
+        ], maxIterations: 12, stepTimeout: 0.15)
+    }
+
+    /// Fetches the most recent pinned message inside a channel or group via TDLib `getChatPinnedMessage`.
+    public func fetchPinnedMessage(for chatId: String) async throws -> Message? {
+        guard authState == .ready, let numericChatId = Int64(chatId) else { return nil }
+        guard let msgObj = try? request([
+            "@type": "getChatPinnedMessage",
+            "chat_id": numericChatId
+        ], maxIterations: 10, stepTimeout: 0.12),
+              (msgObj["@type"] as? String) == "message" else {
+            return nil
+        }
+        let parsed = parseMessage(msgObj, chatId: chatId)
+        return parsed
+    }
+
+    /// Searches both local/server chats (`searchChats`) and public Telegram channels/groups (`searchPublicChats`).
+    public func searchGlobalChats(query: String, limit: Int = 20) async throws -> [Chat] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard authState == .ready, !trimmed.isEmpty else { return [] }
+
+        var collectedIds: [Int64] = []
+        var seen = Set<Int64>()
+
+        if let localRes = try? request(["@type": "searchChats", "query": trimmed, "limit": limit], maxIterations: 10, stepTimeout: 0.12),
+           let ids = localRes["chat_ids"] as? [NSNumber] {
+            for num in ids {
+                let cid = num.int64Value
+                if seen.insert(cid).inserted {
+                    collectedIds.append(cid)
+                }
+            }
+        }
+
+        if let pubRes = try? request(["@type": "searchPublicChats", "query": trimmed], maxIterations: 14, stepTimeout: 0.15),
+           let ids = pubRes["chat_ids"] as? [NSNumber] {
+            for num in ids {
+                let cid = num.int64Value
+                if seen.insert(cid).inserted {
+                    collectedIds.append(cid)
+                }
+            }
+        }
+
+        var results: [Chat] = []
+        for cid in collectedIds.prefix(limit) {
+            guard let cObj = try? request(["@type": "getChat", "chat_id": cid], maxIterations: 6, stepTimeout: 0.08),
+                  (cObj["@type"] as? String) == "chat" else {
+                continue
+            }
+            let title = cObj["title"] as? String ?? "Chat \(cid)"
+            chatNameCache[cid] = title
+            let unread = cObj["unread_count"] as? Int ?? 0
+            let lastMsgObj = cObj["last_message"] as? [String: Any]
+            let preview = Self.extractPreviewText(lastMsgObj)
+            let timestamp = Self.formatTimestamp(lastMsgObj?["date"] as? Int ?? 0)
+            let notif = cObj["notification_settings"] as? [String: Any]
+            let isMuted = (notif?["mute_for"] as? Int ?? 0) > 0
+            let typeObj = cObj["type"] as? [String: Any]
+            let chatType = Self.mapChatType(typeObj)
+            var isForum = (cObj["view_as_topics"] as? Bool) ?? false
+            var isDirectMessagesGroup = false
+            var memberCount: Int? = nil
+            var username: String? = nil
+
+            if (typeObj?["@type"] as? String) == "chatTypeSupergroup",
+               let sgId = (typeObj?["supergroup_id"] as? NSNumber)?.int64Value,
+               let sgObj = try? request(["@type": "getSupergroup", "supergroup_id": sgId], maxIterations: 6, stepTimeout: 0.08),
+               (sgObj["@type"] as? String) == "supergroup" {
+                if sgObj["is_forum"] as? Bool == true { isForum = true }
+                if sgObj["is_direct_messages_group"] as? Bool == true { isDirectMessagesGroup = true }
+                if let mc = sgObj["member_count"] as? Int, mc > 0 { memberCount = mc }
+                if let unameObj = sgObj["usernames"] as? [String: Any],
+                   let active = (unameObj["active_usernames"] as? [String])?.first, !active.isEmpty {
+                    username = "@\(active)"
+                }
+            }
+
+            let photoObj = cObj["photo"] as? [String: Any]
+            let (avatarFileId, avatarLocalPath) = Self.extractFileInfo(photoObj?["small"] as? [String: Any])
+            let hue = Double(abs(cid % 100)) / 100.0
+            results.append(Chat(
+                id: String(cid),
+                title: title,
+                subtitle: username ?? (chatType == .channel ? "Channel" : (chatType == .group ? "Group" : "Direct chat")),
+                avatarInitials: Self.makeInitials(from: title),
+                avatarHue: hue,
+                avatarFileId: avatarFileId,
+                avatarLocalPath: avatarLocalPath,
+                lastMessagePreview: preview.isEmpty ? (username ?? "Telegram chat") : preview,
+                lastMessageTime: timestamp,
+                unreadCount: unread,
+                isPinned: false,
+                isMuted: isMuted,
+                isOnline: false,
+                type: chatType,
+                isForum: isForum,
+                isDirectMessagesGroup: isDirectMessagesGroup,
+                memberCount: memberCount,
+                username: username
+            ))
+        }
+        return results
+    }
+
+    /// Searches message history inside a specific channel or group via TDLib `searchChatMessages`.
+    public func searchMessagesInChat(chatId: String, query: String, limit: Int = 40) async throws -> [Message] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard authState == .ready, !trimmed.isEmpty, let numericChatId = Int64(chatId) else { return [] }
+        guard let res = try? request([
+            "@type": "searchChatMessages",
+            "chat_id": numericChatId,
+            "query": trimmed,
+            "from_message_id": 0,
+            "offset": 0,
+            "limit": limit
+        ], maxIterations: 14, stepTimeout: 0.15),
+              let rawMsgs = (res["messages"] as? [[String: Any]]) else {
+            return []
+        }
+        return rawMsgs.reversed().map { parseMessage($0, chatId: chatId) }
     }
 
     // MARK: - Media & Formatting Helpers

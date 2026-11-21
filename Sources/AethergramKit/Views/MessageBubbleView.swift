@@ -71,11 +71,13 @@ public struct MessageBubbleView: View {
     public let isDownloadingMedia: Bool
     public let isPlayingVoice: Bool
     public let isBookmarked: Bool
+    public let isPinned: Bool
     public let onReply: (Message) -> Void
     public let onReact: (String, String) -> Void
     public let onOpenMedia: (Message) -> Void
     public let onToggleVoice: (Message) -> Void
     public let onToggleBookmark: (Message, Bool) -> Void
+    public let onTogglePin: (Message) -> Void
 
     private var bubbleBg: Color {
         message.isOutgoing ? palette.bubbleOutgoing : palette.bubbleIncoming
@@ -96,11 +98,13 @@ public struct MessageBubbleView: View {
         isDownloadingMedia: Bool = false,
         isPlayingVoice: Bool = false,
         isBookmarked: Bool = false,
+        isPinned: Bool = false,
         onReply: @escaping (Message) -> Void,
         onReact: @escaping (String, String) -> Void,
         onOpenMedia: @escaping (Message) -> Void = { _ in },
         onToggleVoice: @escaping (Message) -> Void = { _ in },
-        onToggleBookmark: @escaping (Message, Bool) -> Void = { _, _ in }
+        onToggleBookmark: @escaping (Message, Bool) -> Void = { _, _ in },
+        onTogglePin: @escaping (Message) -> Void = { _ in }
     ) {
         self.message = message
         self.palette = palette
@@ -108,11 +112,13 @@ public struct MessageBubbleView: View {
         self.isDownloadingMedia = isDownloadingMedia
         self.isPlayingVoice = isPlayingVoice
         self.isBookmarked = isBookmarked
+        self.isPinned = isPinned
         self.onReply = onReply
         self.onReact = onReact
         self.onOpenMedia = onOpenMedia
         self.onToggleVoice = onToggleVoice
         self.onToggleBookmark = onToggleBookmark
+        self.onTogglePin = onTogglePin
     }
 
     public var body: some View {
@@ -173,8 +179,18 @@ public struct MessageBubbleView: View {
                                 .textSelection(.enabled)
                         }
 
-                        // Compact Metadata Footer (Bookmark + Views + Time + Delivery)
+                        // Compact Metadata Footer (Pin + Bookmark + Views + Time + Delivery)
                         HStack(spacing: 6) {
+                            Button {
+                                onTogglePin(message)
+                            } label: {
+                                Image(systemName: isPinned ? "pin.fill" : "pin")
+                                    .font(.system(size: 10, weight: isPinned ? .bold : .regular))
+                                    .foregroundColor(isPinned ? palette.primary : timeColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help(isPinned ? "Unpin Message" : "Pin Message in Chat")
+
                             Button {
                                 onToggleBookmark(message, false)
                             } label: {
@@ -257,6 +273,15 @@ public struct MessageBubbleView: View {
                         } label: {
                             Label("Open Media", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
+                    }
+
+                    Button {
+                        onTogglePin(message)
+                    } label: {
+                        Label(
+                            isPinned ? "Unpin Message" : "Pin Message in Chat",
+                            systemImage: isPinned ? "pin.slash.fill" : "pin.fill"
+                        )
                     }
 
                     Button {

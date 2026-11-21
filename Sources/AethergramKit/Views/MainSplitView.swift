@@ -37,14 +37,26 @@ public struct MainSplitView: View {
             } content: {
                 ChatListColumnView(
                     searchText: $store.searchText,
+                    searchScope: $store.searchScope,
+                    isSearchingGlobalChats: store.isSearchingGlobalChats,
+                    recentlyViewedChats: store.recentlyViewedChats,
                     chats: store.filteredChats,
                     selectedChatId: store.selectedChatId,
                     compactMode: store.compactMode,
                     ghostMode: store.ghostMode,
                     palette: palette,
-                    onSelectChat: selectChat
+                    onSelectChat: selectChat,
+                    onTogglePinChat: { chat in
+                        Task { await store.toggleChatPin(chat) }
+                    },
+                    onClearRecentlyViewed: {
+                        store.clearRecentlyViewedChats()
+                    },
+                    onRemoveRecentlyViewed: { cid in
+                        store.removeRecentlyViewedChat(chatId: cid)
+                    }
                 )
-                .navigationSplitViewColumnWidth(min: 285, ideal: 320, max: 390)
+                .navigationSplitViewColumnWidth(min: 285, ideal: 325, max: 395)
             } detail: {
                 ConversationView(store: store, palette: palette)
             }
@@ -506,44 +518,82 @@ private struct SidebarFooterBar: View {
     }
 }
 
-// MARK: - Column 2 Subviews (ChatListSearchHeader, ChatRowView)
+// MARK: - Column 2 Subviews (ChatListSearchHeader, RecentlyViewedStripView, ChatRowView)
 
 private struct ChatListColumnView: View {
     @Binding var searchText: String
+    @Binding var searchScope: ChatSearchScope
+    let isSearchingGlobalChats: Bool
+    let recentlyViewedChats: [RecentlyViewedChatItem]
     let chats: [Chat]
     let selectedChatId: String?
     let compactMode: Bool
     let ghostMode: Bool
     let palette: MD3ColorPalette
     let onSelectChat: (String) -> Void
+    let onTogglePinChat: (Chat) -> Void
+    let onClearRecentlyViewed: () -> Void
+    let onRemoveRecentlyViewed: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            ChatListSearchHeader(searchText: $searchText, palette: palette)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+            ChatListSearchHeader(
+                searchText: $searchText,
+                searchScope: $searchScope,
+                isSearchingGlobalChats: isSearchingGlobalChats,
+                palette: palette
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .background(palette.surface)
+
+            if !recentlyViewedChats.isEmpty {
+                RecentlyViewedStripView(
+                    items: recentlyViewedChats,
+                    selectedChatId: selectedChatId,
+                    palette: palette,
+                    onSelectChat: onSelectChat,
+                    onRemoveItem: onRemoveRecentlyViewed,
+                    onClearAll: onClearRecentlyViewed
+                )
+                .padding(.bottom, 6)
                 .background(palette.surface)
+            }
 
             Divider()
                 .opacity(0.35)
 
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(chats) { chat in
-                        ChatRowView(
-                            chat: chat,
-                            isSelected: selectedChatId == chat.id,
-                            compactMode: compactMode,
-                            ghostMode: ghostMode,
-                            palette: palette,
-                            onSelect: { onSelectChat(chat.id) }
-                        )
-                    }
+            if chats.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 24))
+                        .foregroundColor(.secondary)
+                    Text(searchText.isEmpty ? "No chats in \(searchScope.rawValue)" : "No results for \"\(searchText)\"")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(chats) { chat in
+                            ChatRowView(
+                                chat: chat,
+                                isSelected: selectedChatId == chat.id,
+                                compactMode: compactMode,
+                                ghostMode: ghostMode,
+                                palette: palette,
+                                onSelect: { onSelectChat(chat.id) },
+                                onTogglePin: { onTogglePinChat(chat) }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 8)
+                }
+                .clipped()
             }
-            .clipped()
         }
         .background(palette.surface)
     }
@@ -551,34 +601,158 @@ private struct ChatListColumnView: View {
 
 private struct ChatListSearchHeader: View {
     @Binding var searchText: String
+    @Binding var searchScope: ChatSearchScope
+    let isSearchingGlobalChats: Bool
     let palette: MD3ColorPalette
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.secondary)
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
 
-            TextField("Search chats...", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                TextField("Search channels, groups, @handles, messages...", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
 
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+                if isSearchingGlobalChats {
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                .buttonStyle(.plain)
+
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .mgGlassCapsule(
+                tint: palette.surfaceContainer.opacity(0.38),
+                interactive: true
+            )
+
+            // Search Scope Filter Pills (All, Channels, Groups, Direct, Unread, Pinned)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(ChatSearchScope.allCases) { scope in
+                        let isSelected = searchScope == scope
+                        Button {
+                            searchScope = scope
+                        } label: {
+                            HStack(spacing: 4) {
+                                if scope == .pinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 9))
+                                } else if scope == .channels {
+                                    Image(systemName: "megaphone.fill")
+                                        .font(.system(size: 9))
+                                } else if scope == .groups {
+                                    Image(systemName: "person.2.fill")
+                                        .font(.system(size: 9))
+                                }
+                                Text(scope.rawValue)
+                                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                            }
+                            .foregroundColor(isSelected ? palette.onPrimary : palette.onSurface)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(isSelected ? palette.primary : palette.surfaceContainer.opacity(0.75))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .mgGlassCapsule(
-            tint: palette.surfaceContainer.opacity(0.38),
-            interactive: true
-        )
+    }
+}
+
+private struct RecentlyViewedStripView: View {
+    let items: [RecentlyViewedChatItem]
+    let selectedChatId: String?
+    let palette: MD3ColorPalette
+    let onSelectChat: (String) -> Void
+    let onRemoveItem: (String) -> Void
+    let onClearAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(palette.primary)
+                    Text("Recently Viewed")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Clear", action: onClearAll)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(items) { item in
+                        let isSelected = selectedChatId == item.chatId
+                        Button {
+                            onSelectChat(item.chatId)
+                        } label: {
+                            HStack(spacing: 6) {
+                                MD3AvatarView(
+                                    localPath: item.avatarLocalPath,
+                                    initials: item.avatarInitials,
+                                    hue: item.avatarHue,
+                                    size: 22
+                                )
+                                Text(item.title)
+                                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                                    .foregroundColor(palette.onSurface)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: 96, alignment: .leading)
+                                if item.isPinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 8.5))
+                                        .foregroundColor(palette.primary)
+                                }
+                            }
+                            .padding(.leading, 5)
+                            .padding(.trailing, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(isSelected ? palette.primary.opacity(0.18) : palette.surfaceContainerLow)
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(isSelected ? palette.primary.opacity(0.45) : palette.outlineVariant.opacity(0.28), lineWidth: 0.75)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                onRemoveItem(item.chatId)
+                            } label: {
+                                Label("Remove from Recently Viewed", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+        }
     }
 }
 
@@ -589,6 +763,7 @@ private struct ChatRowView: View {
     let ghostMode: Bool
     let palette: MD3ColorPalette
     let onSelect: () -> Void
+    let onTogglePin: () -> Void
 
     private var avatarSize: CGFloat {
         compactMode ? 38 : 44
@@ -651,11 +826,13 @@ private struct ChatRowView: View {
                             .truncationMode(.tail)
                             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
-                        if chat.isPinned {
-                            Image(systemName: "pin.fill")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
+                        Button(action: onTogglePin) {
+                            Image(systemName: chat.isPinned ? "pin.fill" : "pin")
+                                .font(.system(size: 10.5, weight: chat.isPinned ? .bold : .regular))
+                                .foregroundColor(chat.isPinned ? palette.primary : .secondary.opacity(0.6))
                         }
+                        .buttonStyle(.plain)
+                        .help(chat.isPinned ? "Unpin \(chat.title)" : "Pin \(chat.title) to top")
 
                         if chat.unreadCount > 0 {
                             MD3Badge(
@@ -685,5 +862,13 @@ private struct ChatRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button(action: onTogglePin) {
+                Label(
+                    chat.isPinned ? "Unpin \(chat.type == .channel ? "Channel" : (chat.type == .group ? "Group" : "Chat"))" : "Pin \(chat.type == .channel ? "Channel" : (chat.type == .group ? "Group" : "Chat")) to Top",
+                    systemImage: chat.isPinned ? "pin.slash.fill" : "pin.fill"
+                )
+            }
+        }
     }
 }

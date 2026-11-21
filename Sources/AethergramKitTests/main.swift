@@ -305,8 +305,36 @@ func runTests() async throws {
     assert(html.contains("rel=\"manifest\" href=\"site.webmanifest\""), "Exported HTML must include site.webmanifest link tag")
     print("  ✓ Verified Aethergram brand identity, 7 bundled favicon assets, and HTML export favicon tags")
 
+    // Test 16: Smart Ranked Search, Scope Filters, Channel/Group Pinning & Recently Viewed History
+    print("[TEST 16/16] Testing Smart Search, Channel/Group Pinning & Recently Viewed...")
+    let ch1 = Chat(id: "-1001", title: "Aethergram Announcements", subtitle: "12K subscribers", avatarInitials: "AA", lastMessagePreview: "New Liquid Glass build", lastMessageTime: "10:00", unreadCount: 3, isPinned: false, type: .channel, username: "@aethergram_news")
+    let grp1 = Chat(id: "-1002", title: "SwiftUI macOS Engineers", subtitle: "850 members", avatarInitials: "SE", lastMessagePreview: "Pinned message support", lastMessageTime: "09:45", unreadCount: 0, isPinned: false, type: .group, username: "@swiftui_mac")
+    store.chats = [ch1, grp1]
+    store.searchText = "@swiftui"
+    assert(store.filteredChats.count == 1 && store.filteredChats.first?.id == "-1002", "Smart search must match @username handle")
+    store.searchText = "aether news"
+    assert(store.filteredChats.first?.id == "-1001", "Smart multi-token search must rank channel matching title + username first")
+    store.searchText = ""
+    store.searchScope = .channels
+    assert(store.filteredChats.count == 1 && store.filteredChats.first?.type == .channel, "Channel scope filter must return only channels")
+    store.searchScope = .all
+
+    // Test pinning channel to top
+    await store.toggleChatPin(grp1)
+    assert(store.chats.first(where: { $0.id == "-1002" })?.isPinned == true, "toggleChatPin must mark group as pinned")
+    assert(store.filteredChats.first?.id == "-1002", "Pinned group/channel must float to top of filteredChats")
+
+    // Test recently viewed recording & persistence
+    let tempRecentURL = FileManager.default.temporaryDirectory.appendingPathComponent("ag_recent_test_\(UUID().uuidString).json")
+    store.recordRecentlyViewedChat(ch1, storageURL: tempRecentURL)
+    store.recordRecentlyViewedChat(grp1, storageURL: tempRecentURL)
+    let loadedRecent = ChatStore.loadRecentlyViewedChats(from: tempRecentURL)
+    assert(loadedRecent.count == 2 && loadedRecent.first?.chatId == "-1002", "Most recently viewed chat must be first and persisted")
+    try? FileManager.default.removeItem(at: tempRecentURL)
+    print("  ✓ Verified ranked search, scope pills, channel/group pinning, and recently viewed persistence")
+
     print("========================================")
-    print("ALL 15 LIVE FEATURE TEST SUITES PASSED! (15/15)")
+    print("ALL 16 LIVE FEATURE TEST SUITES PASSED! (16/16)")
     print("========================================")
 }
 

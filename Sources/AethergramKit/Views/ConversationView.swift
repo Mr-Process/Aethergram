@@ -34,6 +34,9 @@ public struct ConversationView: View {
                             showInspector: store.showInspector,
                             bookmarkCount: store.bookmarks.count,
                             palette: palette,
+                            onTogglePinChat: {
+                                Task { await store.toggleChatPin(chat) }
+                            },
                             onStartCall: startCall,
                             onToggleVoiceRecording: toggleVoiceRecording,
                             onOpenBookmarks: { store.showBookmarksSheet = true },
@@ -42,6 +45,19 @@ public struct ConversationView: View {
                         )
 
                         CallSignalingBannerView(store: store, palette: palette)
+
+                        if let pinnedMsg = store.activeChatPinnedMessage {
+                            PinnedMessageBannerView(
+                                message: pinnedMsg,
+                                palette: palette,
+                                onJump: {
+                                    store.jumpToPinnedMessage()
+                                },
+                                onUnpin: {
+                                    Task { await store.unpinMessageInActiveChat() }
+                                }
+                            )
+                        }
 
                         if chat.isForum || chat.isDirectMessagesGroup || !store.activeChatTopics.isEmpty {
                             TopicsBarView(
@@ -54,7 +70,12 @@ public struct ConversationView: View {
                         }
 
                         if store.showInChatSearch {
-                            InChatSearchBar(query: $store.inChatSearchQuery, palette: palette)
+                            InChatSearchBar(
+                                query: $store.inChatSearchQuery,
+                                isSearchingServer: store.isSearchingInChatMessages,
+                                matchCount: store.filteredMessages.count,
+                                palette: palette
+                            )
                         }
 
                         MessageFeedView(
@@ -67,6 +88,7 @@ public struct ConversationView: View {
                             downloadingMediaMessageId: store.downloadingMediaMessageId,
                             playingVoiceMessageId: store.playingVoiceMessageId,
                             bookmarkedIds: Set(store.bookmarks.map(\.messageId)),
+                            pinnedMessageId: store.activeChatPinnedMessage?.id,
                             bubbleCornerRadius: store.bubbleCornerRadius,
                             palette: palette,
                             onLoadOlder: loadOlderMessages,
@@ -76,6 +98,15 @@ public struct ConversationView: View {
                             onToggleVoice: toggleVoicePlayback,
                             onToggleBookmark: { msg, syncCloud in
                                 store.toggleBookmark(for: msg, syncToTelegramCloud: syncCloud)
+                            },
+                            onTogglePinMessage: { msg in
+                                Task {
+                                    if store.activeChatPinnedMessage?.id == msg.id {
+                                        await store.unpinMessageInActiveChat()
+                                    } else {
+                                        await store.pinMessageInActiveChat(msg)
+                                    }
+                                }
                             }
                         )
 
@@ -188,6 +219,7 @@ private struct ConversationHeaderBar: View {
     let showInspector: Bool
     let bookmarkCount: Int
     let palette: MD3ColorPalette
+    let onTogglePinChat: () -> Void
     let onStartCall: () -> Void
     let onToggleVoiceRecording: () -> Void
     let onOpenBookmarks: () -> Void
@@ -210,6 +242,12 @@ private struct ConversationHeaderBar: View {
                         .foregroundColor(palette.onSurface)
                         .lineLimit(1)
                         .truncationMode(.tail)
+
+                    if chat.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundColor(palette.primary)
+                    }
 
                     if isProxyEnabled {
                         HStack(spacing: 4) {
@@ -237,6 +275,15 @@ private struct ConversationHeaderBar: View {
 
             LiquidGlassContainer(spacing: 6) {
                 HStack(spacing: 6) {
+                    HeaderGlassButton(
+                        systemName: chat.isPinned ? "pin.fill" : "pin",
+                        tint: chat.isPinned ? palette.primary : .secondary,
+                        isActive: chat.isPinned,
+                        palette: palette,
+                        help: chat.isPinned ? "Unpin \(chat.title) from chat list" : "Pin \(chat.title) to top of chat list",
+                        action: onTogglePinChat
+                    )
+
                     HeaderGlassButton(
                         systemName: "phone",
                         tint: .secondary,
@@ -426,8 +473,61 @@ private struct TopicsBarView: View {
     }
 }
 
+private struct PinnedMessageBannerView: View {
+    let message: Message
+    let palette: MD3ColorPalette
+    let onJump: () -> Void
+    let onUnpin: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(palette.primary)
+                .frame(width: 3, height: 26)
+
+            Image(systemName: "pin.fill")
+                .font(.system(size: 11.5, weight: .bold))
+                .foregroundColor(palette.primary)
+
+            Button(action: onJump) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Pinned Message")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(palette.primary)
+                    Text(message.text.isEmpty ? (message.media?.fileName ?? "Pinned media") : message.text)
+                        .font(.system(size: 12))
+                        .foregroundColor(palette.onSurface)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onUnpin) {
+                Image(systemName: "pin.slash")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(5)
+            }
+            .buttonStyle(.plain)
+            .help("Unpin Message")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+        .background(palette.surfaceContainerLow.opacity(0.92))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(palette.outlineVariant.opacity(0.22)),
+            alignment: .bottom
+        )
+    }
+}
+
 private struct InChatSearchBar: View {
     @Binding var query: String
+    let isSearchingServer: Bool
+    let matchCount: Int
     let palette: MD3ColorPalette
 
     var body: some View {
@@ -435,10 +535,17 @@ private struct InChatSearchBar: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
-            TextField("Search messages in this chat...", text: $query)
+            TextField("Search messages in this channel or group...", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
+            if isSearchingServer {
+                ProgressView()
+                    .controlSize(.small)
+            }
             if !query.isEmpty {
+                Text("\(matchCount) found")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
                 Button {
                     query = ""
                 } label: {
@@ -469,6 +576,7 @@ private struct MessageFeedView: View {
     let downloadingMediaMessageId: String?
     let playingVoiceMessageId: String?
     let bookmarkedIds: Set<String>
+    let pinnedMessageId: String?
     let bubbleCornerRadius: CGFloat
     let palette: MD3ColorPalette
     let onLoadOlder: () -> Void
@@ -477,6 +585,7 @@ private struct MessageFeedView: View {
     let onOpenMedia: (Message) -> Void
     let onToggleVoice: (Message) -> Void
     let onToggleBookmark: (Message, Bool) -> Void
+    let onTogglePinMessage: (Message) -> Void
 
     /// Precomputes the first message ID of each consecutive date group in O(N)
     /// so `ForEach(messages)` uses stable identity without `Array(enumerated())`.
@@ -552,11 +661,13 @@ private struct MessageFeedView: View {
                                 isDownloadingMedia: downloadingMediaMessageId == msg.id,
                                 isPlayingVoice: playingVoiceMessageId == msg.id,
                                 isBookmarked: bookmarkedIds.contains(msg.id),
+                                isPinned: pinnedMessageId == msg.id,
                                 onReply: onReply,
                                 onReact: onReact,
                                 onOpenMedia: onOpenMedia,
                                 onToggleVoice: onToggleVoice,
-                                onToggleBookmark: onToggleBookmark
+                                onToggleBookmark: onToggleBookmark,
+                                onTogglePin: onTogglePinMessage
                             )
                             .id(msg.id)
                         }

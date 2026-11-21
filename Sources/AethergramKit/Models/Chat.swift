@@ -57,9 +57,9 @@ public struct Chat: Identifiable, Hashable, Sendable {
     public var avatarLocalPath: String?
     public let lastMessagePreview: String
     public let lastMessageTime: String
-    public let unreadCount: Int
-    public let isPinned: Bool
-    public let isMuted: Bool
+    public var unreadCount: Int
+    public var isPinned: Bool
+    public var isMuted: Bool
     public let isOnline: Bool
     public let type: ChatType
     public let isForum: Bool
@@ -67,6 +67,7 @@ public struct Chat: Identifiable, Hashable, Sendable {
     public let memberCount: Int?
     public let username: String?
     public let datacenterId: Int?
+    public var pinnedMessageId: String?
 
     public init(
         id: String,
@@ -87,7 +88,8 @@ public struct Chat: Identifiable, Hashable, Sendable {
         isDirectMessagesGroup: Bool = false,
         memberCount: Int? = nil,
         username: String? = nil,
-        datacenterId: Int? = nil
+        datacenterId: Int? = nil,
+        pinnedMessageId: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -108,5 +110,40 @@ public struct Chat: Identifiable, Hashable, Sendable {
         self.memberCount = memberCount
         self.username = username
         self.datacenterId = datacenterId
+        self.pinnedMessageId = pinnedMessageId
+    }
+}
+
+public enum ChatSearchScope: String, CaseIterable, Identifiable, Sendable {
+    case all = "All"
+    case channels = "Channels"
+    case groups = "Groups"
+    case direct = "Direct"
+    case unread = "Unread"
+    case pinned = "Pinned"
+
+    public var id: String { rawValue }
+}
+
+public struct RecentlyViewedChatItem: Identifiable, Codable, Hashable, Sendable {
+    public var id: String { chatId }
+    public let chatId: String
+    public let title: String
+    public let avatarInitials: String
+    public let avatarHue: Double
+    public var avatarLocalPath: String?
+    public let type: ChatType
+    public let isPinned: Bool
+    public let viewedAt: Date
+
+    public init(chat: Chat, viewedAt: Date = Date()) {
+        self.chatId = chat.id
+        self.title = chat.title
+        self.avatarInitials = chat.avatarInitials
+        self.avatarHue = chat.avatarHue
+        self.avatarLocalPath = chat.avatarLocalPath
+        self.type = chat.type
+        self.isPinned = chat.isPinned
+        self.viewedAt = viewedAt
     }
 }
