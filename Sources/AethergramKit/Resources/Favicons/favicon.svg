@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="aetherBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#12173D"/>
+      <stop offset="52%" stop-color="#333D99"/>
+      <stop offset="100%" stop-color="#0F94DB"/>
+    </linearGradient>
+    <radialGradient id="auroraGlow" cx="78%" cy="24%" r="68%">
+      <stop offset="0%" stop-color="#73E0FF" stop-opacity="0.48"/>
+      <stop offset="100%" stop-color="#73E0FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wingGrad" x1="20%" y1="22%" x2="78%" y2="79%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#CCF0FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#aetherBg)" stroke="#9EE8FF" stroke-width="8" stroke-opacity="0.45"/>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#auroraGlow)"/>
+  <polygon points="92,261 420,113 343,404 241,312" fill="url(#wingGrad)"/>
+  <polygon points="210,287 420,113 241,312 205,384" fill="#4DBDF9" fill-opacity="0.92"/>
+  <polygon points="138,100 147,126 173,138 147,149 138,176 129,149 103,138 129,126" fill="#BDF5FF"/>
+</svg>

@@ -1,0 +1,9 @@
+{
+  "version": "1.10",
+  "tag_name": "v1.10",
+  "prerelease": false,
+  "asset_name": "Aethergram-v1.10-macOS-arm64.zip",
+  "sha256": "513556855c6e626975f5bf33cf20da93edc90bc1e32b283e2c4078207531f9c4",
+  "download_url": "https://github.com/Mr-Process/Aethergram/releases/download/v1.10/Aethergram-v1.10-macOS-arm64.zip",
+  "release_notes": "Aethergram v1.10 — Initial rebranded macOS Liquid Glass + Material 3 release with TDLib 1.8.70, iMe-style Bookmarks & Cloud Albums, Custom Wallpapers, Live Profile Editor, and HTML/JSON Chat Exporter."
+}

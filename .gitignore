@@ -1,0 +1,16 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/
+*.xcodeproj
+build/*.app
+build/*.zip
+build/*.iconset
+tdlib_config.json
+.env
+*.json
+!updates/current.json
+native_ui_*.png
+build/*.sha256

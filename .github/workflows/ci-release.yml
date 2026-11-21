@@ -1,0 +1,129 @@
+name: Aethergram CI & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional tag to publish as a GitHub Release (e.g. v1.10)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  build-and-package:
+    name: Build & Package Aethergram (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build AethergramMac & AethergramKit
+        run: swift build -c release
+
+      - name: Package & Ad-Hoc Sign Aethergram.app
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          VERSION="1.10"
+          if [[ "$REF_NAME" == v* ]]; then
+            VERSION="${REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            VERSION="${INPUT_TAG#v}"
+          fi
+
+          APP_DIR="dist/Aethergram.app"
+          mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+
+          cp .build/release/AethergramMac "$APP_DIR/Contents/MacOS/Aethergram"
+          chmod +x "$APP_DIR/Contents/MacOS/Aethergram"
+
+          if [ -d ".build/release/AethergramMac_AethergramKit.bundle" ]; then
+            cp -R ".build/release/AethergramMac_AethergramKit.bundle" "$APP_DIR/Contents/Resources/"
+          fi
+
+          cat > "$APP_DIR/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>Aethergram</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundleIdentifier</key>
+              <string>app.aethergram.macos</string>
+              <key>CFBundleName</key>
+              <string>Aethergram</string>
+              <key>CFBundleDisplayName</key>
+              <string>Aethergram</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleVersion</key>
+              <string>110</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>NSPrincipalClass</key>
+              <string>NSApplication</string>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --deep --sign - "$APP_DIR"
+
+          ZIP_NAME="Aethergram-v${VERSION}-macOS-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "dist/${ZIP_NAME}"
+          SHA=$(shasum -a 256 "dist/${ZIP_NAME}" | awk '{print $1}')
+          printf "%s  %s\n" "$SHA" "$ZIP_NAME" > "dist/${ZIP_NAME}.sha256"
+
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        id: pkg
+
+      - name: Publish GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          ZIP_NAME: ${{ steps.pkg.outputs.zip_name }}
+          ZIP_SHA256: ${{ steps.pkg.outputs.zip_sha256 }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          NOTES="Aethergram v${VERSION} (macOS Apple Silicon)
+
+          SHA256: ${ZIP_SHA256}"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "dist/${ZIP_NAME}" "dist/${ZIP_NAME}.sha256" --clobber
+          else
+            gh release create "$TAG_NAME" "dist/${ZIP_NAME}" "dist/${ZIP_NAME}.sha256" \
+              --title "Aethergram v${VERSION}" \
+              --notes "$NOTES"
+          fi
